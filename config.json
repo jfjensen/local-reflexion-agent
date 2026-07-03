@@ -1,0 +1,9 @@
+{
+  "model_registry": {
+    "GENERATOR": "qwen3.5:9b",
+    "CRITIC": "deepseek-coder:6.7b",
+    "ADJUDICATOR": "llama3:8b"
+  },
+  "quality_score_bar": 95,
+  "max_attempts": 4
+}

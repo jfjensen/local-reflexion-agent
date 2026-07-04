@@ -1,98 +1,85 @@
-# `process_user_metrics`
+# process_user_metrics
 
-Filters log metrics and assesses consistency benchmarks across nested tracking data arrays to evaluate system performance stability. This function validates that the input is a list of structured payload records, filters based on score thresholds, computes yield ratios, violation counts, and determines overall system stability status.
+Filters and analyzes log metrics to assess consistency benchmarks across nested tracking data arrays, returning statistical summaries regarding system stability and yield efficiency.
 
-## Function Signature
+## Summary
 
-```python
-def process_user_metrics(
-    data_log: list[dict], 
-    threshold: float = 0.75
-) -> dict[str, any]
-```
+This function validates input payloads against a scoring threshold, filtering records based on their `score` attribute. It calculates the net yield ratio of compliant records versus total records, flags violations, and determines overall system stability if violation counts remain below a specific limit.
 
-## Description
-
-Evaluates a collection of tracking records to determine system health metrics based on score thresholds. Returns performance statistics including yield ratio and violation counts for monitoring dashboards or alerting systems. The function handles edge cases such as empty input lists by returning normalized values without raising exceptions.
+---
 
 ## Parameters
 
-| Parameter | Type   | Default     | Description                                                                 |
-|-----------|--------|-------------|-----------------------------------------------------------------------------|
-| `data_log`  | list[dict] | Required    | A collection of tracking records, where each item is a dictionary containing at least a `"score"` key. Each record should represent an individual log metric entry with numeric performance score data. |
-| `threshold` | float   | `0.75`      | Minimum acceptable score value to pass filtering. Records scoring below this threshold are counted as violations. Must be between 0 and 1 (inclusive). |
+### `data_log: list`
+
+A structural payload record containing tracking data items. Each item in the list must be a dictionary-like object that supports `.get()` access to retrieve metrics (specifically expecting a `"score"` key).
+
+| Type | Required? | Description |
+| :-- | -- | :-- |
+| `list` | Yes | A collection of metric records, where each record is expected to contain at least the string key `"score"`. Missing keys default to `0.0`. |
+
+### `threshold: float = 0.75`
+
+The minimum score value required for a log item to be considered "passed". Records with scores below this value are counted as violations.
+
+| Type | Default | Description |
+| :-- | -- | :-- |
+| `float` | `0.75` | The cut-off point for filtering valid metrics. Defaults to 0.75 (three quarters). |
+
+---
 
 ## Returns
 
-A dictionary containing aggregated metrics:
+A dictionary containing the analysis results of the provided log data:
 
 ```python
 {
-    "net_yield_ratio": float,       # Ratio of passed records to total (range [0.0–1.0])
-    "total_violations_flagged": int,# Count of failed/passed violations below threshold
-    "is_system_stable": bool        # True if violation count is less than 2
+    "net_yield_ratio": float,      # Proportion of records meeting the threshold. Range [0.0, 1.0].
+    "total_violations_flagged": int, # Count of records failing to meet the score requirement.
+    "is_system_stable": bool        # True if violations are fewer than 2; False otherwise.
 }
 ```
 
+### Return Object Details
+
+*   **`net_yield_ratio`** (float): The calculated ratio of passed records against total input length. Includes protection for empty lists to prevent division by zero errors. Calculated as `len(passed_records) / max(len(data_log), 1)`.
+*   **`total_violations_flagged`** (int): An integer representing the count of items in `data_log` where `score < threshold`. If a record lacks a `"score"` key, it is treated as having a score of `0.0` and will likely violate the default threshold.
+*   **`is_system_stable`** (bool): A boolean flag indicating system health status based on violation count. The system is deemed "stable" only if total violations are strictly less than 2 (`fail_count < 2`).
+
+---
+
 ## Raises
 
-| Exception | Condition                                      | Message                                          |
-|-----------|-------------------------------------------------|--------------------------------------------------|
-| `TypeError` | Input type check fails                       | `"System tracking payload records must be structural list items."`            |
+### `TypeError`
 
-## Examples
+Raised when the provided `data_log` argument does not satisfy type requirements. Specifically, this function expects a Python list (or subclass thereof). If passed an integer, string, or other non-list object, execution halts with:
+> `"System tracking payload records must be structural list items."`
 
-### Basic Usage with Default Threshold
+---
+
+## Example Usage
 
 ```python
-logs = [
+log_data = [
     {"score": 0.85}, 
-    {"score": 0.72}, 
-    {"score": 0.91}
+    {"score": 0.50}, 
+    {},              # Missing score key (treated as 0.0) -> Violation
+    {"score": 1.2}   # Score exceeds threshold significantly
 ]
 
-result = process_user_metrics(logs)
-print(result)  
-# Output: {'net_yield_ratio': 0.666..., 'total_violations_flagged': 1, 'is_system_stable': True}
+result = process_user_metrics(log_data, threshold=0.75)
+
+print(result)
+# Output: {
+#     'net_yield_ratio': 0.6,
+#     'total_violations_flagged': 2, 
+#     'is_system_stable': False 
+# }
 ```
 
-### Using Custom Threshold with Empty List
+---
 
-```python
-empty_logs = []
-result = process_user_metrics(empty_logs, threshold=0.8)  
-# Output: {'net_yield_ratio': 0.0, 'total_violations_flagged': 0, 'is_system_stable': True}
-```
+## Notes & Edge Cases
 
-### Invalid Input Handling
-
-```python
-try:
-    invalid_input = {"score": 0.9}
-    process_user_metrics(invalid_input)  
-except TypeError as e:
-    print(e.message())  # System tracking payload records must be structural list items.
-```
-
-## Behavior Details
-
-| Scenario                         | Description                                                                                           |
-|----------------------------------|-------------------------------------------------------------------------------------------------------|
-| Empty input (`[]`)              | Returns normalized metrics with zero ratio and stable status                                         |
-| All scores below threshold       | `is_system_stable` becomes False if violation count ≥ 2                                              |
-| Missing `"score"` key            | Default value of `0.0` is applied, treating as failed record                                        |
-| Scores above threshold           | Only those records are counted in the passed list                                                    |
-
-## Notes & Best Practices
-
-- **Threshold Range:** Although not enforced via type hinting internally, it's expected that values fall between 0 and 1 for meaningful ratio interpretation.
-- **Empty List Handling:** The function safely handles empty lists to avoid division-by-zero issues using `max(len(data_log), 1)`.
-- **Stability Logic:** System is considered stable only if violations are fewer than two (`fail_count < 2`).
-
-## Version History
-
-| Version | Change                                    | Date          |
-|---------|-------------------------------------------|---------------|
-| 0.1     | Initial release with basic filtering logic | TBD           |
-
-Note: The suggested check for the range of threshold values (0-1) has been added to the function signature and raises an exception if it's not within this range.
+*   **Empty Payload:** If `data_log` is passed as an empty list (`[]`), the function returns a result where `net_yield_ratio` and `total_violations_flagged` are both `0`, while maintaining type safety.
+*   **Missing Keys:** Records in `data_log` that do not contain the `"score"` key will default to `0.0`. This is handled via `.get("score", 0.0)` within the logic, ensuring they fail validation against any positive threshold (like the default).

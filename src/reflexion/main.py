@@ -22,12 +22,25 @@ MAX_ATTEMPTS = 4
 # ---------------------------------------------------------------------------
 
 class DocEvaluationSchema(BaseModel):
-    """Pydantic schema used to force a structured JSON schema constraint out of our local critic model."""
+    """Pydantic schema used to force a structured JSON schema constraint out of our local critic model.
+    Deliberately contains only judgment fields: the overall average and the pass/fail decision are computed in code."""
     technical_accuracy: int = Field(description="Score from 0-100 on accuracy.")
     completeness: int = Field(description="Score from 0-100 covering parameter definitions.")
-    overall_percentage: int = Field(description="The net average score.")
-    is_production_ready: bool = Field(description="True if net score >= passing threshold.")
     single_critical_fix: str = Field(description="The single absolute highest priority correction required.")
+
+
+def sanitize_critical_fix(fix: Optional[str]) -> str:
+    """Guards against degenerate critic feedback (empty strings or runaway token repetition)."""
+    stripped = (fix or "").strip()
+    words = stripped.split()
+    is_degenerate = (
+        not stripped
+        or len(set(stripped)) <= 4
+        or (len(words) > 5 and len(set(words)) <= 2)
+    )
+    if is_degenerate:
+        return "Re-verify the documentation line by line against the source code and correct the weakest section."
+    return stripped
 
 
 def append_scores(old: List[int], new: List[int]) -> List[int]:
@@ -98,10 +111,17 @@ def content_critic_node(state: AgentWorkflowState) -> dict:
     structured_llm = llm.with_structured_output(DocEvaluationSchema)
     
     system_prompt = (
-        f"You are an exceptionally harsh QA inspector evaluating API documentation. "
-        f"Analyze the text objectively against the source code. "
-        f"If there are any subtle formatting errors, descriptive contradictions, or parameter calculation inaccuracies, "
-        f"tank the score aggressively. Set 'is_production_ready' to true ONLY if the overall_percentage is >= {QUALITY_SCORE_BAR}."
+        f"You are a meticulous QA inspector evaluating API documentation against its source code. "
+        f"You are grading the DOCUMENTATION, not the source code. Never deduct points because the source code "
+        f"itself could be designed better, and never ask for the source code to be changed. "
+        f"Score by deduction: start from 100 and subtract points only for concrete errors you can verify by "
+        f"pointing at specific documentation text that contradicts the source code. "
+        f"Check that every 'raise' statement in the source is documented with its exact exception type and its "
+        f"exact quoted error message: a missing, denied, or misquoted exception is a major deduction. "
+        f"Recompute every numeric value shown in the documentation's examples against what the source code would "
+        f"actually return: a wrong number is a major deduction. "
+        f"If you find no verifiable errors, score 100. "
+        f"The single_critical_fix must point at the documentation text to change, not at the source code."
     )
     
     user_prompt = (
@@ -116,18 +136,23 @@ def content_critic_node(state: AgentWorkflowState) -> dict:
         HumanMessage(content=user_prompt)
     ])
     
+    # The model provides the judgment scores; the arithmetic and the pass/fail decision are done here in code.
+    overall_score = round((evaluation.technical_accuracy + evaluation.completeness) / 2)
+    is_approved = overall_score >= QUALITY_SCORE_BAR
+    required_fix = sanitize_critical_fix(evaluation.single_critical_fix)
+    
     print("\n 📊 CRITIC SCORECARD SUMMARY:")
     print(f"    ├─ Technical Accuracy : {evaluation.technical_accuracy}/100")
     print(f"    ├─ Completeness       : {evaluation.completeness}/100")
-    print(f"    ├─ Net Overall Score  : {evaluation.overall_percentage}/100 (Pass Bar: {QUALITY_SCORE_BAR})")
-    print(f"    ├─ Ready for Prod?    : {'🟢 YES' if evaluation.is_production_ready else '🔴 NO'}")
-    print(f"    └─ Stated Feedback    : \"{evaluation.single_critical_fix}\"")
+    print(f"    ├─ Net Overall Score  : {overall_score}/100 (Pass Bar: {QUALITY_SCORE_BAR}, computed in code)")
+    print(f"    ├─ Ready for Prod?    : {'🟢 YES' if is_approved else '🔴 NO'}")
+    print(f"    └─ Stated Feedback    : \"{required_fix}\"")
     
     return {
-        "current_score": evaluation.overall_percentage,
-        "score_history": [evaluation.overall_percentage],
-        "required_fix": evaluation.single_critical_fix,
-        "is_approved": evaluation.is_production_ready
+        "current_score": overall_score,
+        "score_history": [overall_score],
+        "required_fix": required_fix,
+        "is_approved": is_approved
     }
 
 def content_adjudicator_node(state: AgentWorkflowState) -> dict:
@@ -298,16 +323,33 @@ def run():
             print("🪓 [CLEANER] Removing conversational introductory preamble from final markdown artifact...")
             clean_final_markdown = "#" + parts[1]
             
-    # 2. Clean Postscript (Conversational text at the bottom)
-    # Check if the model left an conversational 'Note:' or sign-off paragraph at the very end
+    # 2. Clean Postscript (Conversational and meta review text at the bottom)
+    # Sweep trailing lines, removing 'Note:' sign-offs and leftover critic/adjudicator meta-sentences
+    # ("No formatting errors or contradictions were found.") until a real content line is reached.
+    meta_prefixes = (
+        "note:", "note that", "i hope", "this concludes", "in conclusion",
+        "no formatting errors", "no contradictions", "no errors",
+        "let me know", "feel free", "please let me know"
+    )
+    meta_keywords = ("errors or contradictions", "contradictions were found", "errors were found")
+
     lines = clean_final_markdown.rstrip().split("\n")
-    if lines:
+    while lines:
         last_line = lines[-1].strip()
-        # Common local LLM signature postscript patterns
-        if last_line.startswith(("Note:", "Note that", "I hope", "This concludes")):
-            print("🪓 [CLEANER] Chopping off conversational chatty postscript from final markdown artifact...")
-            # Rebuild the file omitting the final conversational lines
-            clean_final_markdown = "\n".join(lines[:-1]).rstrip() + "\n"
+        if not last_line:
+            lines.pop()
+            continue
+        lowered = last_line.lower()
+        # Real content usually carries Markdown structure; meta chatter does not.
+        is_structural = lowered.startswith(("#", "|", "-", "*", ">", "`")) or lowered[0].isdigit()
+        is_meta = (not is_structural) and (
+            lowered.startswith(meta_prefixes) or any(k in lowered for k in meta_keywords)
+        )
+        if not is_meta:
+            break
+        print("🪓 [CLEANER] Chopping off conversational meta postscript from final markdown artifact...")
+        lines.pop()
+    clean_final_markdown = "\n".join(lines).rstrip() + "\n"
             
     print("\n" + "💾 [FILE EXPORTER] Verifying Output Paths...")
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
